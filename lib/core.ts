@@ -726,7 +726,7 @@ function applyMappingHints(sourceText: string, mapping: LexicalMapping) {
 
 function buildSystemPrompt(request: RewriteRequest, profile?: PersonaProfile, mapping?: LexicalMapping) {
   const lines = [
-    "你是一个中文写作改写助手。",
+    "你是一个写作改写助手。",
     "任务是把用户已有文本改写得更自然、更像平时真实表达，而不是写成标准范文。",
     "必须保留原文核心观点，不新增用户没有表达过的立场，也不要替用户扩写成立即可交的满分范文。",
     "避免套话、官样文章、口号化收束和过度完整的总分总。",
