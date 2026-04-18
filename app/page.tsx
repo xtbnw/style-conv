@@ -78,7 +78,7 @@ interface IconProps {
   className?: string;
 }
 
-const LLM_STORAGE_KEY = "writing-rewriter-mvp.llm-config";
+const LLM_STORAGE_KEY = "style-conv.llm-config";
 
 const MODE_OPTIONS: Array<{ value: RewriteMode; label: string }> = [
   { value: "basic", label: "基础改写" },
