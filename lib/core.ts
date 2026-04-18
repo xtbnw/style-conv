@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, stat, writeFile } from "fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "fs/promises";
 import path from "path";
 
 export type RewriteMode = "basic" | "persona" | "mapping";
@@ -57,6 +57,13 @@ export interface PersonaSummary {
   mappingSummary: string;
   metrics: StyleMetrics;
   mapping: LexicalMapping;
+}
+
+export interface PersonaDetail {
+  profile: PersonaProfile;
+  mapping: LexicalMapping;
+  corpusCount: number;
+  corpusFiles: string[];
 }
 
 export interface LlmConfig {
@@ -480,6 +487,23 @@ async function readCorpusTexts(personaId: string) {
   return results;
 }
 
+async function readCorpusFileNames(personaId: string) {
+  const dir = corpusDir(personaId);
+  await ensureDir(dir);
+  const names = await readdir(dir);
+  const files: string[] = [];
+
+  for (const name of names) {
+    const fullPath = path.join(dir, name);
+    const fileStat = await stat(fullPath).catch(() => null);
+    if (fileStat?.isFile()) {
+      files.push(name);
+    }
+  }
+
+  return files.sort();
+}
+
 async function loadPersonaBundle(personaId: string) {
   const dirStat = await stat(personaDir(personaId)).catch(() => null);
   if (!dirStat?.isDirectory()) {
@@ -766,6 +790,20 @@ export async function listPersonas(): Promise<PersonaSummary[]> {
   return items.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
+export async function getPersonaDetail(personaId: string): Promise<PersonaDetail> {
+  const bundle = await loadPersonaBundle(personaId);
+  if (!bundle) {
+    throw new AppError("persona 不存在", 404);
+  }
+
+  return {
+    profile: bundle.profile,
+    mapping: bundle.mapping,
+    corpusCount: bundle.corpusTexts.length,
+    corpusFiles: await readCorpusFileNames(personaId),
+  };
+}
+
 export async function createPersona(name: string, description: string) {
   await ensureDir(DATA_ROOT);
   const personaId = `${safeSlug(name)}-${Date.now().toString().slice(-6)}`;
@@ -795,6 +833,15 @@ export async function createPersona(name: string, description: string) {
   await writeJsonFile(mappingPath(personaId), mapping);
 
   return profile;
+}
+
+export async function deletePersona(personaId: string) {
+  const dir = personaDir(personaId);
+  const dirStat = await stat(dir).catch(() => null);
+  if (!dirStat?.isDirectory()) {
+    throw new AppError("persona 不存在", 404);
+  }
+  await rm(dir, { recursive: true, force: true });
 }
 
 export async function rebuildPersona(personaId: string, llm: LlmConfig) {
@@ -905,6 +952,32 @@ export async function updatePersonaMapping(personaId: string, entries: MappingEn
   return nextMapping;
 }
 
+export async function updatePersonaProfile(personaId: string, updates: { summary?: string; promptProfile?: string }) {
+  const profile = await readJsonFile<PersonaProfile | null>(profilePath(personaId), null);
+  if (!profile) {
+    throw new AppError("persona 不存在", 404);
+  }
+
+  const nextSummary = updates.summary?.trim();
+  const nextPromptProfile = updates.promptProfile?.trim();
+  if (!nextSummary && !nextPromptProfile) {
+    throw new AppError("请至少提供一项画像更新内容", 400);
+  }
+
+  const nextProfile: PersonaProfile = {
+    ...profile,
+    updatedAt: nowIso(),
+    portrait: {
+      ...profile.portrait,
+      summary: nextSummary || profile.portrait.summary,
+      promptProfile: nextPromptProfile || profile.portrait.promptProfile,
+    },
+  };
+
+  await writeJsonFile(profilePath(personaId), nextProfile);
+  return nextProfile;
+}
+
 export async function rewriteText(request: RewriteRequest): Promise<RewriteResponse> {
   validateLlmConfig(request.llm);
   if (!request.sourceText.trim()) {
@@ -918,11 +991,11 @@ export async function rewriteText(request: RewriteRequest): Promise<RewriteRespo
 
   if (request.mode !== "basic") {
     if (!request.personaId) {
-      throw new AppError("当前模式需要先选择 persona", 400);
+      throw new AppError("当前模式需要先选择语料角色", 400);
     }
     const bundle = await loadPersonaBundle(request.personaId);
     if (!bundle || bundle.corpusTexts.length === 0) {
-      throw new AppError("所选 persona 还没有可用语料", 400);
+      throw new AppError("所选角色还没有可用语料", 400);
     }
     profile = bundle.profile;
     if (request.mode === "mapping") {

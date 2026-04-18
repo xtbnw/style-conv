@@ -3,10 +3,13 @@ import {
   AppError,
   addCorpusFiles,
   createPersona,
+  deletePersona,
+  getPersonaDetail,
   type LlmConfig,
   listPersonas,
   rebuildPersona,
   rewriteText,
+  updatePersonaProfile,
   updatePersonaMapping,
   type MappingEntry,
   type RewriteRequest,
@@ -37,6 +40,10 @@ export async function GET(_request: NextRequest, context: { params: Promise<{ sl
     const personas = await listPersonas();
     return NextResponse.json({ personas });
   }
+  if (slug.length === 2 && slug[0] === "personas") {
+    const detail = await getPersonaDetail(decodeURIComponent(slug[1] ?? ""));
+    return NextResponse.json(detail);
+  }
   return jsonError("未找到接口", 404);
 }
 
@@ -53,7 +60,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sl
     if (slug.length === 1 && slug[0] === "personas") {
       const body = (await request.json()) as { name?: string; description?: string };
       if (!body.name?.trim()) {
-        return jsonError("请输入 persona 名称");
+        return jsonError("请输入语料名称");
       }
       const persona = await createPersona(body.name, body.description ?? "");
       return NextResponse.json({ persona });
@@ -97,18 +104,38 @@ export async function POST(request: NextRequest, context: { params: Promise<{ sl
 
 export async function PATCH(request: NextRequest, context: { params: Promise<{ slug?: string[] }> }) {
   const { slug = [] } = await context.params;
-  if (!(slug.length === 3 && slug[0] === "personas" && slug[2] === "mapping")) {
+  if (!(slug.length === 3 && slug[0] === "personas" && (slug[2] === "mapping" || slug[2] === "profile"))) {
     return jsonError("未找到接口", 404);
   }
 
   try {
-    const body = (await request.json()) as { entries?: MappingEntry[] };
-    if (!Array.isArray(body.entries)) {
-      return jsonError("映射表格式不正确");
+    if (slug[2] === "mapping") {
+      const body = (await request.json()) as { entries?: MappingEntry[] };
+      if (!Array.isArray(body.entries)) {
+        return jsonError("映射表格式不正确");
+      }
+      const mapping = await updatePersonaMapping(decodeURIComponent(slug[1] ?? ""), body.entries);
+      return NextResponse.json({ mapping });
     }
-    const mapping = await updatePersonaMapping(decodeURIComponent(slug[1] ?? ""), body.entries);
-    return NextResponse.json({ mapping });
+
+    const body = (await request.json()) as { summary?: string; promptProfile?: string };
+    const profile = await updatePersonaProfile(decodeURIComponent(slug[1] ?? ""), body);
+    return NextResponse.json({ profile });
   } catch (error) {
     return jsonError(error instanceof Error ? error.message : "更新失败", toStatus(error));
+  }
+}
+
+export async function DELETE(_request: NextRequest, context: { params: Promise<{ slug?: string[] }> }) {
+  const { slug = [] } = await context.params;
+  if (!(slug.length === 2 && slug[0] === "personas")) {
+    return jsonError("未找到接口", 404);
+  }
+
+  try {
+    await deletePersona(decodeURIComponent(slug[1] ?? ""));
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "删除失败", toStatus(error));
   }
 }
