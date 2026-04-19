@@ -17,7 +17,14 @@ export interface StyleMetrics {
 export interface StylePortrait {
   summary: string;
   promptProfile: string;
+  fewShotExamples: FewShotExample[];
   metrics: StyleMetrics;
+}
+
+export interface FewShotExample {
+  id: string;
+  content: string;
+  source: "auto" | "manual";
 }
 
 export interface MappingEntry {
@@ -44,6 +51,13 @@ export interface PersonaProfile {
   createdAt: string;
   updatedAt: string;
   portrait: StylePortrait;
+}
+
+function normalizePortrait(portrait: StylePortrait): StylePortrait {
+  return {
+    ...portrait,
+    fewShotExamples: Array.isArray(portrait.fewShotExamples) ? portrait.fewShotExamples : [],
+  };
 }
 
 export interface PersonaSummary {
@@ -104,6 +118,10 @@ interface PersonaLlmUpdate {
   mappingSummary: string;
   preferredConnectors: string[];
   logicHabits: string[];
+  fewShotExamples?: Array<{
+    content: string;
+    reason?: string;
+  }>;
   entries: Array<{
     official: string;
     preferred: string;
@@ -305,7 +323,54 @@ function inferStructurePreference(content: string) {
   return "整体偏顺着思路展开，不会刻意把逻辑写得过满";
 }
 
-function buildPortrait(metrics: StyleMetrics) {
+function normalizeSnippet(content: string, maxLength = 120) {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (compact.length <= maxLength) {
+    return compact;
+  }
+
+  const clipped = compact.slice(0, maxLength);
+  const punctuationIndex = Math.max(clipped.lastIndexOf("。"), clipped.lastIndexOf("！"), clipped.lastIndexOf("？"));
+  const safeEnd = punctuationIndex >= 20 ? punctuationIndex + 1 : maxLength;
+  return `${compact.slice(0, safeEnd).trim()}……`;
+}
+
+function buildFewShotExamples(contents: string[]) {
+  const paragraphCandidates = contents.flatMap((content) =>
+    splitParagraphs(content)
+      .map((paragraph) => normalizeSnippet(paragraph, 120))
+      .filter((paragraph) => paragraph.length >= 24 && paragraph.length <= 130),
+  );
+
+  const sentenceCandidates = contents.flatMap((content) =>
+    splitSentences(content)
+      .map((sentence) => normalizeSnippet(sentence, 60))
+      .filter((sentence) => sentence.length >= 12 && sentence.length <= 60),
+  );
+
+  const candidates = [...paragraphCandidates, ...sentenceCandidates];
+  const seen = new Set<string>();
+  const examples: FewShotExample[] = [];
+
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    examples.push({
+      id: `example-${examples.length + 1}`,
+      content: candidate,
+      source: "auto",
+    });
+    if (examples.length >= 3) {
+      break;
+    }
+  }
+
+  return examples;
+}
+
+function buildPortrait(metrics: StyleMetrics, fewShotExamples: FewShotExample[] = []) {
   const connectorLine = metrics.topConnectors.length > 0 ? metrics.topConnectors.join("、") : "连接词使用不密";
   const colloquialLine = metrics.topColloquials.length > 0 ? metrics.topColloquials.join("、") : "口头词不固定";
   const sentenceBias =
@@ -344,6 +409,7 @@ function buildPortrait(metrics: StyleMetrics) {
   return {
     summary,
     promptProfile,
+    fewShotExamples,
     metrics,
   } satisfies StylePortrait;
 }
@@ -428,6 +494,37 @@ function buildMapping(metrics: StyleMetrics) {
 
 function dedupeStrings(values: string[], limit: number) {
   return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean))).slice(0, limit);
+}
+
+function sanitizeFewShotExamples(
+  examples: PersonaLlmUpdate["fewShotExamples"],
+  fallback: FewShotExample[],
+  previous?: FewShotExample[],
+) : FewShotExample[] {
+  const manualExamples = (previous ?? []).filter((item) => item.source === "manual");
+  const autoExamples: FewShotExample[] = [];
+
+  for (const [index, item] of (examples ?? []).entries()) {
+    const content = item.content.trim();
+    if (!content) {
+      continue;
+    }
+    const normalized = normalizeSnippet(content, 140);
+    if (!normalized || autoExamples.some((candidate) => candidate.content === normalized)) {
+      continue;
+    }
+    autoExamples.push({
+      id: `example-${index + 1}`,
+      content: normalized,
+      source: "auto",
+    });
+    if (autoExamples.length >= 4) {
+      break;
+    }
+  }
+
+  const merged = [...manualExamples, ...autoExamples].slice(0, 4);
+  return merged.length > 0 ? merged : fallback;
 }
 
 function sanitizeMappingEntries(entries: PersonaLlmUpdate["entries"], fallback: MappingEntry[], previous?: LexicalMapping | null) {
@@ -517,7 +614,14 @@ async function loadPersonaBundle(personaId: string) {
     return null;
   }
 
-  return { profile, mapping, corpusTexts };
+  return {
+    profile: {
+      ...profile,
+      portrait: normalizePortrait(profile.portrait),
+    },
+    mapping,
+    corpusTexts,
+  };
 }
 
 function normalizeBaseUrl(baseUrl: string) {
@@ -599,6 +703,35 @@ function extractJsonPayload(content: string) {
   return JSON.parse(raw.slice(start, end + 1)) as PersonaLlmUpdate;
 }
 
+async function requestStructuredPersonaUpdate(llm: LlmConfig, userPrompt: string) {
+  const initialResponse = await requestLlmText(
+    llm,
+    "你是一个擅长抽取中文写作风格和表达偏好的助手。只输出合法 JSON。",
+    userPrompt,
+    0.35,
+  );
+
+  try {
+    return extractJsonPayload(initialResponse);
+  } catch {
+    const repairedResponse = await requestLlmText(
+      llm,
+      "你是一个 JSON 修复助手。你的任务不是改写内容，只把给定内容修复成合法 JSON，并保持字段语义不变。只输出 JSON。",
+      [
+        "把下面这段内容修复成合法 JSON。",
+        "要求：",
+        "1. 保留原有字段和语义。",
+        "2. 不要补充额外解释。",
+        "3. 如果有 markdown 代码块，去掉代码块。",
+        "",
+        initialResponse,
+      ].join("\n"),
+      0.1,
+    );
+    return extractJsonPayload(repairedResponse);
+  }
+}
+
 function buildPersonaRefreshPrompt(args: {
   profile: PersonaProfile;
   previousMapping: LexicalMapping | null;
@@ -669,6 +802,82 @@ function buildPersonaRefreshPrompt(args: {
   ].join("\n");
 }
 
+function buildPersonaRefreshPromptV2(args: {
+  profile: PersonaProfile;
+  previousMapping: LexicalMapping | null;
+  existingCorpusCount: number;
+  newCorpusTexts: string[];
+  basePortrait: StylePortrait;
+  baseMapping: LexicalMapping;
+}) {
+  const previousMappings = (args.previousMapping?.entries ?? [])
+    .slice(0, 20)
+    .map((entry) => `- ${entry.official} -> ${entry.preferred} (${entry.source})`)
+    .join("\n");
+  const previousFewShots = args.profile.portrait.fewShotExamples.map((item) => `- ${item.content}`).join("\n");
+  const newCorpus = args.newCorpusTexts.map((content, index) => `### 新语料 ${index + 1}\n${content}`).join("\n\n");
+
+  return [
+    "你在帮助维护一个中文写作 persona。",
+    "你的任务不是改写正文，而是根据现有 persona 和新增语料，输出新的风格总结、few-shot 示例和映射规则。",
+    "请优先依据真实语料归纳，不要凭空脑补。",
+    "输出必须是合法 JSON，不要输出 markdown 代码块，不要解释。",
+    "",
+    `persona 名称：${args.profile.name}`,
+    `persona 说明：${args.profile.description || "无"}`,
+    `本次新增前的历史语料数：${args.existingCorpusCount}`,
+    "",
+    `旧风格总结：${args.profile.portrait.summary}`,
+    `旧 prompt 风格约束：${args.profile.portrait.promptProfile}`,
+    `旧 few-shot 示例：\n${previousFewShots || "- 无"}`,
+    `旧映射摘要：${args.previousMapping?.summary || "无"}`,
+    previousMappings ? `旧映射条目：\n${previousMappings}` : "旧映射条目：无",
+    "",
+    `规则统计生成的兜底风格总结：${args.basePortrait.summary}`,
+    `规则统计生成的兜底映射摘要：${args.baseMapping.summary}`,
+    `规则统计推荐连接词：${args.baseMapping.preferredConnectors.join("、") || "无"}`,
+    `规则统计推荐逻辑习惯：${args.baseMapping.logicHabits.join("；") || "无"}`,
+    "",
+    "新增语料如下：",
+    newCorpus,
+    "",
+    "请返回下面这个 JSON 结构：",
+    JSON.stringify(
+      {
+        profileSummary: "新的整体风格总结，60-140字",
+        promptProfile: "供改写模型直接使用的风格约束，可多行",
+        mappingSummary: "新的映射摘要，40-100字",
+        preferredConnectors: ["连接词1", "连接词2"],
+        logicHabits: ["逻辑习惯1", "逻辑习惯2"],
+        fewShotExamples: [
+          {
+            content: "最能代表风格的原文短片段",
+            reason: "为什么这段有代表性",
+          },
+        ],
+        entries: [
+          {
+            official: "首先",
+            preferred: "先说",
+            note: "为什么这么替换",
+            enabled: true,
+          },
+        ],
+      },
+      null,
+      2,
+    ),
+    "",
+    "要求：",
+    "1. profileSummary 要像风格画像，不要空泛。",
+    "2. promptProfile 要能直接给改写模型使用，明确句长、语气、连接词、结构习惯和禁用表达。",
+    "3. fewShotExamples 选 2 到 4 段最有代表性的原文短片段，只能来自语料，不要改写，不要太长。",
+    "4. entries 控制在 8 到 15 条，优先覆盖官样连接词、模板词和书面表达。",
+    "5. 不要把普通高频基础词强行做成映射。",
+    "6. 如果旧映射仍然合理，可以保留或微调。",
+  ].join("\n");
+}
+
 async function summarizePersonaWithLlm(args: {
   llm: LlmConfig;
   profile: PersonaProfile;
@@ -678,12 +887,12 @@ async function summarizePersonaWithLlm(args: {
   newCorpusTexts: string[];
 }) {
   const metrics = collectMetrics(args.allCorpusTexts);
-  const basePortrait = buildPortrait(metrics);
+  const fallbackFewShotExamples = buildFewShotExamples(args.allCorpusTexts);
+  const basePortrait = buildPortrait(metrics, fallbackFewShotExamples);
   const baseMapping = buildMapping(metrics);
-  const responseText = await requestLlmText(
+  const parsed = await requestStructuredPersonaUpdate(
     args.llm,
-    "你是一个擅长抽取中文写作风格和表达偏好的助手。只输出合法 JSON。",
-    buildPersonaRefreshPrompt({
+    buildPersonaRefreshPromptV2({
       profile: args.profile,
       previousMapping: args.previousMapping,
       existingCorpusCount: args.existingCorpusCount,
@@ -691,14 +900,19 @@ async function summarizePersonaWithLlm(args: {
       basePortrait,
       baseMapping,
     }),
-    0.35,
   );
-  const parsed = extractJsonPayload(responseText);
   const entries = sanitizeMappingEntries(parsed.entries ?? [], baseMapping.entries, args.previousMapping);
+  const fewShotExamples = sanitizeFewShotExamples(
+    parsed.fewShotExamples,
+    fallbackFewShotExamples,
+    args.profile.portrait.fewShotExamples,
+  );
+
   return {
     portrait: {
       summary: parsed.profileSummary?.trim() || basePortrait.summary,
       promptProfile: parsed.promptProfile?.trim() || basePortrait.promptProfile,
+      fewShotExamples,
       metrics,
     } satisfies StylePortrait,
     mapping: {
@@ -734,13 +948,21 @@ function buildSystemPrompt(request: RewriteRequest, profile?: PersonaProfile, ma
     "允许局部保留一点口语感、主观感和不那么工整的自然衔接。",
     "输出只给最终改写后的正文，不要解释。",
   ];
-
-  if (request.instructions?.trim()) {
-    lines.push(`用户额外要求：${request.instructions.trim()}`);
+  const extraInstructions = request.instructions?.trim();
+  if (extraInstructions) {
+    lines.push(`???????????{extraInstructions}`);
   }
 
   if (profile) {
     lines.push(profile.portrait.promptProfile);
+    if (profile.portrait.fewShotExamples.length > 0) {
+      lines.push(
+        [
+          "下面是这个 persona 的 few-shot 风格片段，只模仿语气、句长、衔接和表达习惯，不要照抄内容：",
+          ...profile.portrait.fewShotExamples.map((item, index) => `示例${index + 1}：${item.content}`),
+        ].join("\n"),
+      );
+    }
   }
 
   if (mapping) {
@@ -824,7 +1046,7 @@ export async function createPersona(name: string, description: string) {
     description: description.trim(),
     createdAt,
     updatedAt: createdAt,
-    portrait: buildPortrait(metrics),
+    portrait: buildPortrait(metrics, []),
   };
   const mapping = buildMapping(metrics);
 

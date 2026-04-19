@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState, useTransition, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useState, useTransition, type ComponentType, type ReactElement, type ReactNode } from "react";
 
 type RewriteMode = "basic" | "persona" | "mapping";
 type WorkspaceView = "workbench" | "personas" | "settings";
@@ -42,6 +42,11 @@ interface PersonaProfile {
   portrait: {
     summary: string;
     promptProfile: string;
+    fewShotExamples: Array<{
+      id: string;
+      content: string;
+      source: "auto" | "manual";
+    }>;
     metrics: StyleMetrics;
   };
 }
@@ -89,7 +94,7 @@ const MODE_OPTIONS: Array<{ value: RewriteMode; label: string }> = [
 const VIEW_OPTIONS: Array<{
   value: WorkspaceView;
   label: string;
-  icon: (props: IconProps) => ReactElement;
+  icon: ComponentType<IconProps>;
 }> = [
   { value: "workbench", label: "工作台", icon: EditIcon },
   { value: "personas", label: "语料角色", icon: PersonaIcon },
@@ -203,6 +208,8 @@ export default function HomePage() {
   const [pendingUploadPersonaId, setPendingUploadPersonaId] = useState("");
   const [pendingRebuildPersonaId, setPendingRebuildPersonaId] = useState("");
   const [rebuildingPersonaId, setRebuildingPersonaId] = useState("");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isUpdatingCorpus, setIsUpdatingCorpus] = useState(false);
   const [isPending, startTransition] = useTransition();
 
   const selectedPersona = useMemo(
@@ -292,25 +299,30 @@ export default function HomePage() {
   async function handleRewrite() {
     ensureLlmConfig();
     setError("");
+    setIsGenerating(true);
     setStatus("正在改写...");
-    const response = await fetch("/api/rewrite", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode,
-        personaId: mode === "basic" ? undefined : selectedPersonaId || undefined,
-        sourceText,
-        instructions,
-        llm: { baseUrl, apiKey, model },
-      }),
-    });
-    const payload = (await response.json()) as RewriteResponse & { error?: string };
-    if (!response.ok) {
-      throw new Error(payload.error ?? "改写失败");
+    try {
+      const response = await fetch("/api/rewrite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          personaId: mode === "basic" ? undefined : selectedPersonaId || undefined,
+          sourceText,
+          instructions,
+          llm: { baseUrl, apiKey, model },
+        }),
+      });
+      const payload = (await response.json()) as RewriteResponse & { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "改写失败");
+      }
+      setResult(payload);
+      setCopied(false);
+      setStatus("改写完成");
+    } finally {
+      setIsGenerating(false);
     }
-    setResult(payload);
-    setCopied(false);
-    setStatus("改写完成");
   }
 
   async function handleCopy() {
@@ -377,26 +389,32 @@ export default function HomePage() {
     if (!corpusFiles?.length) {
       throw new Error("请先选择语料文件");
     }
+    setIsUpdatingCorpus(true);
     const form = new FormData();
     Array.from(corpusFiles).forEach((file) => form.append("files", file));
     form.append("baseUrl", baseUrl);
     form.append("apiKey", apiKey);
     form.append("model", model);
-    const response = await fetch(`/api/personas/${encodeURIComponent(pendingUploadPersonaId)}/corpus`, {
-      method: "POST",
-      body: form,
-    });
-    const payload = (await response.json()) as { error?: string };
-    if (!response.ok) {
-      throw new Error(payload.error ?? "上传失败");
+    setStatus("语料更新中...");
+    try {
+      const response = await fetch(`/api/personas/${encodeURIComponent(pendingUploadPersonaId)}/corpus`, {
+        method: "POST",
+        body: form as BodyInit,
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "上传失败");
+      }
+      setShowUploadModal(false);
+      setCorpusFiles(null);
+      await loadPersonas(pendingUploadPersonaId);
+      if (selectedPersonaId === pendingUploadPersonaId) {
+        await loadPersonaDetail(pendingUploadPersonaId);
+      }
+      setStatus("语料已更新");
+    } finally {
+      setIsUpdatingCorpus(false);
     }
-    setShowUploadModal(false);
-    setCorpusFiles(null);
-    await loadPersonas(pendingUploadPersonaId);
-    if (selectedPersonaId === pendingUploadPersonaId) {
-      await loadPersonaDetail(pendingUploadPersonaId);
-    }
-    setStatus("语料已更新");
   }
 
   async function handleRebuildPersona(personaId: string) {
@@ -515,10 +533,14 @@ export default function HomePage() {
           })}
         </nav>
 
-        <div className="sidebar-help">
+        <button
+          type="button"
+          className="sidebar-help"
+          onClick={() => window.open("https://github.com/xtbnw/style-conv", "_blank", "noopener,noreferrer")}
+        >
           <span className="help-badge">?</span>
           <span>Help</span>
-        </div>
+        </button>
       </aside>
 
       <section className="studio-main">
@@ -541,8 +563,8 @@ export default function HomePage() {
                 />
 
                 <div className="input-toolbar">
-                  <button className="toolbar-chip generate-button" type="button" onClick={() => runAction(handleRewrite)} disabled={isPending || !llmReady}>
-                    生成
+                  <button className="toolbar-chip generate-button" type="button" onClick={() => runAction(handleRewrite)} disabled={isPending || isGenerating || !llmReady}>
+                    {isGenerating ? "生成中" : "生成"}
                   </button>
                 </div>
               </article>
@@ -553,7 +575,7 @@ export default function HomePage() {
                     <span>输出</span>
                     <strong>改写结果</strong>
                   </div>
-                  <span className="quality-pill">{result ? "已生成" : "待生成"}</span>
+                  <span className={`quality-pill ${isGenerating ? "is-busy" : ""}`}>{isGenerating ? "生成中" : result ? "已生成" : "待生成"}</span>
                 </div>
 
                 <div className="text-board output-board">
@@ -638,8 +660,8 @@ export default function HomePage() {
                         <p>{persona.description || persona.profileSummary}</p>
                       </button>
                       <div className="persona-card-actions">
-                        <button type="button" onClick={() => openUploadModal(persona.id)}>
-                          添加语料
+                        <button type="button" onClick={() => openUploadModal(persona.id)} disabled={isUpdatingCorpus || rebuildingPersonaId === persona.id}>
+                          {isUpdatingCorpus && pendingUploadPersonaId === persona.id ? "更新中" : "添加语料"}
                         </button>
                         <button type="button" onClick={() => openRebuildModal(persona.id)} disabled={rebuildingPersonaId === persona.id}>
                           重绘
@@ -720,6 +742,29 @@ export default function HomePage() {
                       <span>举例倾向</span>
                       <strong>{personaDetail.profile.portrait.metrics.examplePreference}</strong>
                     </article>
+                  </div>
+                </section>
+
+                <section className="mapping-section">
+                  <div className="mapping-section-head">
+                    <span className="section-label">Few-shot 示例片段</span>
+                  </div>
+                  <div className="mapping-sheet">
+                    {personaDetail.profile.portrait.fewShotExamples.length > 0 ? (
+                      personaDetail.profile.portrait.fewShotExamples.map((example) => (
+                        <div className="mapping-sheet-row" key={example.id}>
+                          <input value={example.source === "manual" ? "手动" : "自动"} readOnly />
+                          <input value={example.content} readOnly />
+                          <input value="改写时会附在 prompt 里作为风格示例" readOnly />
+                        </div>
+                      ))
+                    ) : (
+                      <div className="mapping-sheet-row">
+                        <input value="暂无" readOnly />
+                        <input value="当前 persona 还没有可用的 few-shot 示例片段" readOnly />
+                        <input value="上传语料并重绘后会自动生成" readOnly />
+                      </div>
+                    )}
                   </div>
                 </section>
 
@@ -856,6 +901,7 @@ export default function HomePage() {
               <button
                 className="toolbar-chip"
                 type="button"
+                disabled={Boolean(rebuildingPersonaId)}
                 onClick={() => {
                   setShowRebuildModal(false);
                   setPendingRebuildPersonaId("");
@@ -863,8 +909,8 @@ export default function HomePage() {
               >
                 取消
               </button>
-              <button className="generate-button" type="button" onClick={() => runAction(handleConfirmRebuildPersona)}>
-                确认重建
+              <button className="generate-button modal-action-button" type="button" onClick={() => runAction(handleConfirmRebuildPersona)} disabled={Boolean(rebuildingPersonaId)}>
+                {rebuildingPersonaId ? "重绘中" : "确认重绘"}
               </button>
             </div>
           </div>
@@ -896,8 +942,8 @@ export default function HomePage() {
                 <span className="file-picker-status">{corpusFiles?.length ? `已选择 ${corpusFiles.length} 个文件` : "支持 txt / md，可多选"}</span>
               </div>
             <div className="modal-actions">
-              <button className="settings-save" type="button" onClick={() => runAction(handleUploadCorpus)} disabled={isPending || !llmReady || !corpusFiles?.length}>
-                更新语料
+              <button className="settings-save modal-action-button" type="button" onClick={() => runAction(handleUploadCorpus)} disabled={isPending || isUpdatingCorpus || !llmReady || !corpusFiles?.length}>
+                {isUpdatingCorpus ? "更新中" : "更新语料"}
               </button>
             </div>
           </div>

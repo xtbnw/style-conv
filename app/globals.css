@@ -2,6 +2,7 @@
   --background: #f9f9f9;
   --surface: #ffffff;
   --surface-low: #f2f4f4;
+  --surface-lowest: #eef2f2;
   --surface-container: #ebeeef;
   --surface-variant: #dde4e5;
   --surface-high: #e4e9ea;
@@ -175,7 +176,11 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
+  padding: 10px 0;
+  background: transparent;
   color: var(--on-surface-variant);
+  text-align: left;
 }
 
 .help-badge {
@@ -283,6 +288,12 @@ textarea:focus {
   color: var(--primary);
   font-size: 0.78rem;
   font-weight: 600;
+}
+
+.quality-pill.is-busy {
+  background: rgba(76, 97, 108, 0.14);
+  color: var(--primary-dim);
+  font-weight: 800;
 }
 
 .text-board {
@@ -746,6 +757,19 @@ textarea.text-board {
   color: rgba(90, 96, 97, 0.72);
   font-size: 0.82rem;
   line-height: 1.5;
+}
+
+.modal-actions {
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.modal-action-button,
+.modal-actions .toolbar-chip,
+.modal-actions .generate-button,
+.modal-actions .settings-save {
+  min-width: 132px;
+  justify-content: center;
 }
 
 .modal-form {

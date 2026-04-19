@@ -8,3 +8,5 @@ data/personas/
 .env.test.local
 .env.production.local
 .DS_Store
+/rg-local.exe
+/tsconfig.tsbuildinfo
