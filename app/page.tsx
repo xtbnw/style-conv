@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useMemo, useState, useTransition, type ComponentType, type ReactElement, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition, type ComponentType, type ReactElement, type ReactNode } from "react";
 
 type RewriteMode = "basic" | "persona" | "mapping";
 type WorkspaceView = "workbench" | "personas" | "settings";
@@ -182,6 +182,7 @@ function BackIcon({ className }: IconProps) {
 }
 
 export default function HomePage() {
+  const personaDetailAbortRef = useRef<AbortController | null>(null);
   const [view, setView] = useState<WorkspaceView>("workbench");
   const [mode, setMode] = useState<RewriteMode>("basic");
   const [personas, setPersonas] = useState<PersonaSummary[]>([]);
@@ -252,15 +253,27 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    if (!(view === "personas" && selectedPersonaId && personaDetail)) {
+    if (view !== "personas" || !selectedPersonaId) {
+      return;
+    }
+    if (personaDetail?.profile.id === selectedPersonaId) {
       return;
     }
     startTransition(() => {
       loadPersonaDetail(selectedPersonaId).catch((reason) => {
+        if (reason instanceof DOMException && reason.name === "AbortError") {
+          return;
+        }
         setError(reason instanceof Error ? reason.message : "读取 persona 详情失败");
       });
     });
-  }, [view, selectedPersonaId, personaDetail]);
+  }, [view, selectedPersonaId, personaDetail?.profile.id]);
+
+  useEffect(() => {
+    return () => {
+      personaDetailAbortRef.current?.abort();
+    };
+  }, []);
 
   useEffect(() => {
     setProfileSummaryDraft(personaDetail?.profile.portrait.summary ?? "");
@@ -288,12 +301,23 @@ export default function HomePage() {
   }
 
   async function loadPersonaDetail(personaId: string) {
-    const response = await fetch(`/api/personas/${encodeURIComponent(personaId)}`);
+    personaDetailAbortRef.current?.abort();
+    const controller = new AbortController();
+    personaDetailAbortRef.current = controller;
+    const response = await fetch(`/api/personas/${encodeURIComponent(personaId)}`, {
+      signal: controller.signal,
+    });
     const payload = (await response.json()) as PersonaDetail & { error?: string };
     if (!response.ok) {
       throw new Error(payload.error ?? "读取 persona 详情失败");
     }
+    if (controller.signal.aborted) {
+      return;
+    }
     setPersonaDetail(payload);
+    if (personaDetailAbortRef.current === controller) {
+      personaDetailAbortRef.current = null;
+    }
   }
 
   async function handleRewrite() {
@@ -648,6 +672,7 @@ export default function HomePage() {
                         type="button"
                         className="persona-card-main"
                         onClick={() => {
+                          personaDetailAbortRef.current?.abort();
                           setSelectedPersonaId(persona.id);
                           runAction(() => loadPersonaDetail(persona.id));
                         }}
@@ -690,6 +715,7 @@ export default function HomePage() {
                       type="button"
                       className="back-button"
                       onClick={() => {
+                        personaDetailAbortRef.current?.abort();
                         setPersonaDetail(null);
                         setSelectedPersonaId("");
                       }}

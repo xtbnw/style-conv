@@ -193,6 +193,7 @@ const OFFICIAL_PHRASE_SEEDS = [
   "首先",
   "其次",
   "最后",
+  "总的来说",
   "综上所述",
   "值得注意的是",
   "不可忽视的是",
@@ -200,12 +201,27 @@ const OFFICIAL_PHRASE_SEEDS = [
   "在此基础上",
   "进一步来说",
   "由此可见",
+  "换言之",
+  "就此而言",
+  "纵观来看",
+  "笔者认为",
+  "毋庸置疑",
+  "需要指出的是",
+  "归根结底",
+  "与此同时",
+  "从这个角度看",
+  "从本质上讲",
+  "显而易见",
+  "有必要指出",
+  "值得一提的是",
+  "不可否认的是",
 ];
 
 const OFFICIAL_DEFAULTS: Record<string, string[]> = {
   "首先": ["先说", "先看", "先讲"],
   "其次": ["然后", "再说", "再看"],
   "最后": ["最后再说", "最后一点", "收回来讲"],
+  "总的来说": ["总的看", "整体上看", "大体来说"],
   "综上所述": ["总的看", "总的来说", "说到底"],
   "值得注意的是": ["其实", "有一点得说", "顺带一提"],
   "不可忽视的是": ["别忽略", "还有个点", "还有一点"],
@@ -213,7 +229,49 @@ const OFFICIAL_DEFAULTS: Record<string, string[]> = {
   "在此基础上": ["接着往下说", "顺着这个", "在这个前提下"],
   "进一步来说": ["再往下说", "再展开点", "再补一句"],
   "由此可见": ["能看出来", "大概能说明", "也就能理解了"],
+  "换言之": ["换个说法", "换句话说", "说白了"],
+  "就此而言": ["这么看", "照这个看", "从这点看"],
+  "纵观来看": ["整体看", "看下来", "大体看"],
+  "笔者认为": ["我觉得", "我自己的看法是", "在我看来"],
+  "毋庸置疑": ["基本可以确定", "这点没太大悬念", "差不多可以确定"],
+  "需要指出的是": ["得先说明", "这里得提一句", "先补一句"],
+  "归根结底": ["说到底", "往根上说", "归根到底"],
+  "与此同时": ["同时", "另外一边", "同一时间"],
+  "从这个角度看": ["这么看", "换个角度看", "从这点看"],
+  "从本质上讲": ["往根上说", "说到底", "本质上看"],
+  "显而易见": ["很明显", "基本一眼能看出来", "看得出来"],
+  "有必要指出": ["得补一句", "这里得说清楚", "有个点得提"],
+  "值得一提的是": ["顺带一提", "另外提一句", "有个细节挺重要"],
+  "不可否认的是": ["得承认", "不能不承认", "有一说一"],
 };
+
+const DISTINCTIVE_PHRASE_BLACKLIST = new Set([
+  "我们",
+  "你们",
+  "他们",
+  "这个",
+  "那个",
+  "一种",
+  "自己",
+  "没有",
+  "不是",
+  "因为",
+  "所以",
+  "但是",
+  "如果",
+  "然后",
+  "其实",
+  "的话",
+  "就是",
+  "可以",
+  "比较",
+  "觉得",
+  "进行",
+  "以及",
+  "对于",
+  "通过",
+  "为了",
+]);
 
 async function ensureDir(target: string) {
   await mkdir(target, { recursive: true });
@@ -333,6 +391,99 @@ function normalizeSnippet(content: string, maxLength = 120) {
   const punctuationIndex = Math.max(clipped.lastIndexOf("。"), clipped.lastIndexOf("！"), clipped.lastIndexOf("？"));
   const safeEnd = punctuationIndex >= 20 ? punctuationIndex + 1 : maxLength;
   return `${compact.slice(0, safeEnd).trim()}……`;
+}
+
+function normalizeCorpusText(content: string) {
+  return content.replace(/\r\n/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function dedupeCorpusTexts(contents: string[]) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+
+  for (const content of contents) {
+    const normalized = normalizeCorpusText(content);
+    const fingerprint = normalized.replace(/\s+/g, "");
+    if (!normalized || seen.has(fingerprint)) {
+      continue;
+    }
+    seen.add(fingerprint);
+    unique.push(normalized);
+  }
+
+  return unique;
+}
+
+function scoreSnippet(content: string) {
+  let score = 0;
+  if (/[我我们]/.test(content)) {
+    score += 3;
+  }
+  if (/(其实|不过|但是|所以|然后|另外|我觉得|有点|说白了|换个角度看)/.test(content)) {
+    score += 4;
+  }
+  if (/[（(].+[）)]/.test(content)) {
+    score += 2;
+  }
+  if (/(比如|例如|举个例子)/.test(content)) {
+    score += 2;
+  }
+  const length = content.replace(/\s+/g, "").length;
+  if (length >= 30 && length <= 180) {
+    score += 3;
+  }
+  return score;
+}
+
+function selectRepresentativeSnippets(contents: string[], limit = 10) {
+  const candidates = contents.flatMap((content) =>
+    splitParagraphs(content)
+      .map((paragraph) => normalizeSnippet(paragraph, 180))
+      .filter((paragraph) => paragraph.length >= 28 && paragraph.length <= 180),
+  );
+
+  return candidates
+    .map((content) => ({ content, score: scoreSnippet(content) }))
+    .sort((left, right) => right.score - left.score || right.content.length - left.content.length)
+    .reduce<string[]>((acc, item) => {
+      if (!acc.includes(item.content)) {
+        acc.push(item.content);
+      }
+      return acc;
+    }, [])
+    .slice(0, limit);
+}
+
+function extractDistinctivePhrases(contents: string[], limit = 18) {
+  const counts = new Map<string, number>();
+  const merged = contents.join("\n");
+  const matches = merged.match(/[\u4e00-\u9fa5]{2,8}/g) ?? [];
+
+  for (const phrase of matches) {
+    if (phrase.length < 2 || DISTINCTIVE_PHRASE_BLACKLIST.has(phrase)) {
+      continue;
+    }
+    if (/^(一个|一些|一种|一样|什么|怎么|为什么|时候|事情|问题|东西|地方)$/.test(phrase)) {
+      continue;
+    }
+    counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= 2)
+    .sort((left, right) => right[1] - left[1] || right[0].length - left[0].length)
+    .map(([phrase]) => phrase)
+    .filter((phrase, index, list) => !list.some((other, otherIndex) => otherIndex < index && other.includes(phrase)))
+    .slice(0, limit);
+}
+
+function buildCorpusDigest(contents: string[]) {
+  const uniqueContents = dedupeCorpusTexts(contents);
+  return {
+    uniqueContents,
+    distinctivePhrases: extractDistinctivePhrases(uniqueContents),
+    representativeSnippets: selectRepresentativeSnippets(uniqueContents),
+  };
 }
 
 function buildFewShotExamples(contents: string[]) {
@@ -492,6 +643,23 @@ function buildMapping(metrics: StyleMetrics) {
   } satisfies LexicalMapping;
 }
 
+function buildEntryIndex(entries: MappingEntry[]) {
+  const index = new Map<string, MappingEntry>();
+  for (const entry of entries) {
+    const official = entry.official.trim();
+    const preferred = entry.preferred.trim();
+    if (!official || !preferred || index.has(official)) {
+      continue;
+    }
+    index.set(official, {
+      ...entry,
+      official,
+      preferred,
+    });
+  }
+  return index;
+}
+
 function dedupeStrings(values: string[], limit: number) {
   return Array.from(new Set(values.map((item) => item.trim()).filter(Boolean))).slice(0, limit);
 }
@@ -527,10 +695,14 @@ function sanitizeFewShotExamples(
   return merged.length > 0 ? merged : fallback;
 }
 
-function sanitizeMappingEntries(entries: PersonaLlmUpdate["entries"], fallback: MappingEntry[], previous?: LexicalMapping | null) {
-  if (!entries.length) {
-    return fallback;
-  }
+function sanitizeMappingEntries(
+  entries: PersonaLlmUpdate["entries"],
+  fallback: MappingEntry[],
+  previous?: LexicalMapping | null,
+  minCount = 12,
+  maxCount = 24,
+) {
+  const fallbackIndex = buildEntryIndex(fallback);
 
   const manualByOfficial = new Map(
     (previous?.entries ?? [])
@@ -560,7 +732,27 @@ function sanitizeMappingEntries(entries: PersonaLlmUpdate["entries"], fallback: 
     })
     .filter((entry): entry is MappingEntry => Boolean(entry));
 
-  return nextEntries.length > 0 ? nextEntries : fallback;
+  const merged = buildEntryIndex(nextEntries);
+
+  for (const entry of previous?.entries ?? []) {
+    if (merged.size >= minCount) {
+      break;
+    }
+    if (!merged.has(entry.official)) {
+      merged.set(entry.official, entry);
+    }
+  }
+
+  for (const [official, entry] of fallbackIndex.entries()) {
+    if (merged.size >= maxCount) {
+      break;
+    }
+    if (!merged.has(official)) {
+      merged.set(official, entry);
+    }
+  }
+
+  return Array.from(merged.values()).slice(0, Math.max(minCount, Math.min(maxCount, merged.size || minCount)));
 }
 
 async function readCorpusTexts(personaId: string) {
@@ -806,7 +998,9 @@ function buildPersonaRefreshPromptV2(args: {
   profile: PersonaProfile;
   previousMapping: LexicalMapping | null;
   existingCorpusCount: number;
+  totalCorpusCount: number;
   newCorpusTexts: string[];
+  allCorpusTexts: string[];
   basePortrait: StylePortrait;
   baseMapping: LexicalMapping;
 }) {
@@ -815,7 +1009,11 @@ function buildPersonaRefreshPromptV2(args: {
     .map((entry) => `- ${entry.official} -> ${entry.preferred} (${entry.source})`)
     .join("\n");
   const previousFewShots = args.profile.portrait.fewShotExamples.map((item) => `- ${item.content}`).join("\n");
-  const newCorpus = args.newCorpusTexts.map((content, index) => `### 新语料 ${index + 1}\n${content}`).join("\n\n");
+  const newDigest = buildCorpusDigest(args.newCorpusTexts);
+  const allDigest = buildCorpusDigest(args.allCorpusTexts);
+  const newCorpus = newDigest.representativeSnippets.map((content, index) => `### 新语料代表片段 ${index + 1}\n${content}`).join("\n\n");
+  const allCorpus = allDigest.representativeSnippets.map((content, index) => `### 全量语料代表片段 ${index + 1}\n${content}`).join("\n\n");
+  const targetEntryCount = Math.min(24, Math.max(12, Math.ceil(allDigest.uniqueContents.length * 2.5)));
 
   return [
     "你在帮助维护一个中文写作 persona。",
@@ -826,6 +1024,8 @@ function buildPersonaRefreshPromptV2(args: {
     `persona 名称：${args.profile.name}`,
     `persona 说明：${args.profile.description || "无"}`,
     `本次新增前的历史语料数：${args.existingCorpusCount}`,
+    `当前总语料数（去重前）：${args.totalCorpusCount}`,
+    `当前总语料数（去重后）：${allDigest.uniqueContents.length}`,
     "",
     `旧风格总结：${args.profile.portrait.summary}`,
     `旧 prompt 风格约束：${args.profile.portrait.promptProfile}`,
@@ -837,9 +1037,14 @@ function buildPersonaRefreshPromptV2(args: {
     `规则统计生成的兜底映射摘要：${args.baseMapping.summary}`,
     `规则统计推荐连接词：${args.baseMapping.preferredConnectors.join("、") || "无"}`,
     `规则统计推荐逻辑习惯：${args.baseMapping.logicHabits.join("；") || "无"}`,
+    `从全量语料抽到的高频风格短语：${allDigest.distinctivePhrases.join("、") || "无"}`,
+    `从新增语料抽到的高频风格短语：${newDigest.distinctivePhrases.join("、") || "无"}`,
     "",
-    "新增语料如下：",
-    newCorpus,
+    "新增语料代表片段如下：",
+    newCorpus || "无",
+    "",
+    "全量语料代表片段如下：",
+    allCorpus || "无",
     "",
     "请返回下面这个 JSON 结构：",
     JSON.stringify(
@@ -872,9 +1077,10 @@ function buildPersonaRefreshPromptV2(args: {
     "1. profileSummary 要像风格画像，不要空泛。",
     "2. promptProfile 要能直接给改写模型使用，明确句长、语气、连接词、结构习惯和禁用表达。",
     "3. fewShotExamples 选 2 到 4 段最有代表性的原文短片段，只能来自语料，不要改写，不要太长。",
-    "4. entries 控制在 8 到 15 条，优先覆盖官样连接词、模板词和书面表达。",
+    `4. entries 尽量输出 ${targetEntryCount} 条，至少 12 条，最多 24 条，优先覆盖官样连接词、模板词、书面表达和常见空泛收束句。`,
     "5. 不要把普通高频基础词强行做成映射。",
     "6. 如果旧映射仍然合理，可以保留或微调。",
+    "7. profileSummary 和 promptProfile 要尽量具体，写出常见语气词、句法节奏、展开方式、自我修正习惯、是否爱举例、是否爱下定义、是否爱先抛观点后补解释。",
   ].join("\n");
 }
 
@@ -886,22 +1092,27 @@ async function summarizePersonaWithLlm(args: {
   allCorpusTexts: string[];
   newCorpusTexts: string[];
 }) {
-  const metrics = collectMetrics(args.allCorpusTexts);
-  const fallbackFewShotExamples = buildFewShotExamples(args.allCorpusTexts);
+  const uniqueAllCorpusTexts = dedupeCorpusTexts(args.allCorpusTexts);
+  const uniqueNewCorpusTexts = dedupeCorpusTexts(args.newCorpusTexts);
+  const metrics = collectMetrics(uniqueAllCorpusTexts);
+  const fallbackFewShotExamples = buildFewShotExamples(uniqueAllCorpusTexts);
   const basePortrait = buildPortrait(metrics, fallbackFewShotExamples);
   const baseMapping = buildMapping(metrics);
+  const targetEntryCount = Math.min(24, Math.max(12, Math.ceil(uniqueAllCorpusTexts.length * 2.5)));
   const parsed = await requestStructuredPersonaUpdate(
     args.llm,
     buildPersonaRefreshPromptV2({
       profile: args.profile,
       previousMapping: args.previousMapping,
       existingCorpusCount: args.existingCorpusCount,
-      newCorpusTexts: args.newCorpusTexts,
+      totalCorpusCount: args.allCorpusTexts.length,
+      allCorpusTexts: uniqueAllCorpusTexts,
+      newCorpusTexts: uniqueNewCorpusTexts.length > 0 ? uniqueNewCorpusTexts : uniqueAllCorpusTexts,
       basePortrait,
       baseMapping,
     }),
   );
-  const entries = sanitizeMappingEntries(parsed.entries ?? [], baseMapping.entries, args.previousMapping);
+  const entries = sanitizeMappingEntries(parsed.entries ?? [], baseMapping.entries, args.previousMapping, targetEntryCount, 24);
   const fewShotExamples = sanitizeFewShotExamples(
     parsed.fewShotExamples,
     fallbackFewShotExamples,
@@ -950,7 +1161,7 @@ function buildSystemPrompt(request: RewriteRequest, profile?: PersonaProfile, ma
   ];
   const extraInstructions = request.instructions?.trim();
   if (extraInstructions) {
-    lines.push(`???????????{extraInstructions}`);
+    lines.push(`额外要求：${extraInstructions}`);
   }
 
   if (profile) {
